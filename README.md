@@ -1,6 +1,6 @@
 # Smart-Glove
 
-ioc file: lines out a lot of changes from the original PCB design. turned off a lot of pins and made them GND for twisted pair wirings. 
+ioc file: lines out the protocol ports needed for all sensors
 
 VL6180X.h .c : functions for the distance sensor VL6180X
 bno055.h .c : functions for the IMU
