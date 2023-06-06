@@ -1,0 +1,1213 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2023 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "adc.h"
+#include "dma.h"
+#include "i2c.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "bno055.h"
+#include "string.h"
+#include "queue.h"
+#include "VL6180X.h"
+#include <stdlib.h>
+
+/* printf function */
+#include <stdio.h>
+//#ifdef __GNUC__
+//#define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
+//#else
+#define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
+//#endif
+
+PUTCHAR_PROTOTYPE
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+  return ch;
+}
+/*end of printf function*/
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+// Create an instance of the bno055_dev structure for each IMU
+bno055_t imu1;
+bno055_t imu2;
+
+//f32 volatile gyro1_x, gyro1_y, gyro1_z;
+//f32 volatile gyro2_x, gyro2_y, gyro2_z;
+f32 euler1_x, euler1_y, euler1_z;
+f32 volatile init_euler1_x, init_euler1_y, init_euler1_z;
+//f32 volatile euler2_x, euler2_y, euler2_z;
+f32 volatile test_x, test_y, test_z;
+
+//f32 volatile a1_x, a1_y, a1_z;
+f32 volatile a2_x, a2_y, a2_z;
+f32 volatile absx = 0;
+f32 volatile absy = 0;
+f32 volatile absz = 0;
+f32 volatile change_x = 0;
+f32 volatile change_y = 0;
+f32 volatile change_z = 0;
+
+uint16_t volatile readFSR1;
+uint16_t volatile readFSR2;
+
+f32 max_change = 0;
+int rotate_xyz = 0; // x == 1, y == 2, z == 3
+
+/* FSR related */
+#define FSR_threshold 0x0A00
+uint8_t FSR1_pressed = 0;
+uint8_t FSR2_pressed = 0;
+/* STATES */
+#define IDLE 0x00
+#define WAIT_ZOOM_IN 0x01
+#define WAIT_ZOOM_OUT 0x02
+#define WAIT_SHIFT 0x03
+#define WAIT_ROTATE 0x04
+#define ZOOM_IN_2 0x05
+#define ZOOM_IN_4 0x06
+#define ZOOM_OUT_2 0x07
+#define ZOOM_OUT_4 0x08
+#define SHIFT_L1 0x09
+#define SHIFT_L2 0x0a
+#define SHIFT_L3 0x0b
+#define SHIFT_L1_DONE 0x0c
+#define SHIFT_L2_DONE 0x0d
+#define SHIFT_L3_DONE 0x0e
+#define SHIFT_R1 0x0f
+#define SHIFT_R2 0x10
+#define SHIFT_R3 0x11
+#define SHIFT_R1_DONE 0x12
+#define SHIFT_R2_DONE 0x13
+#define SHIFT_R3_DONE 0x14
+#define SHIFT_U1 0x15
+#define SHIFT_U2 0x16
+#define SHIFT_U3 0x17
+#define SHIFT_U1_DONE 0x18
+#define SHIFT_U2_DONE 0x19
+#define SHIFT_U3_DONE 0x1a
+#define SHIFT_D1 0x1b
+#define SHIFT_D2 0x1c
+#define SHIFT_D3 0x1d
+#define SHIFT_D1_DONE 0x1e
+#define SHIFT_D2_DONE 0x1f
+#define SHIFT_D3_DONE 0x20
+#define SHIFT_F1 0x21
+#define SHIFT_F2 0x22
+#define SHIFT_F3 0x23
+#define SHIFT_F1_DONE 0x24
+#define SHIFT_F2_DONE 0x25
+#define SHIFT_F3_DONE 0x26
+#define SHIFT_B1 0x27
+#define SHIFT_B2 0x28
+#define SHIFT_B3 0x29
+#define SHIFT_B1_DONE 0x2a
+#define SHIFT_B2_DONE 0x2b
+#define SHIFT_B3_DONE 0x2c
+#define ROTATE_X 0x2d
+#define ROTATE_Y 0x2e
+#define ROTATE_Z 0x2f
+/* gesture command */
+#define CMD_LEFT 0x00 
+#define	CMD_RIGHT 0x01
+#define CMD_UP 0x02 
+#define CMD_DOWN 0x03
+#define CMD_FRONT 0x04
+#define CMD_BACK 0x05
+#define CMD_ROTATE_X 0x06
+#define CMD_ROTATE_Y 0x07
+#define CMD_ROTATE_Z 0x08
+#define CMD_ZOOM 0x09
+#define CMD_NONE 0xff
+/* gesture data */
+#define DATA_SHIFT_SPEED_1 0x01
+#define DATA_SHIFT_SPEED_2 0x02
+#define DATA_SHIFT_SPEED_3 0x03
+#define DATA_ZOOM_IN_2 0x02
+#define DATA_ZOOM_IN_4 0x03
+#define DATA_ZOOM_OUT_2 0x05
+#define DATA_ZOOM_OUT_4 0x06
+#define DATA_NO_ZOOM_IN_OUT 0x04
+#define DATA_NONE 0xff
+/* FSR behavior */
+#define ROTATE_MODE (FSR1_pressed == 1 && FSR2_pressed == 1)
+#define ZOOM_MODE (FSR1_pressed == 0 && FSR2_pressed == 1)
+#define SHIFT_MODE (FSR1_pressed == 1 && FSR2_pressed == 0)
+/* Shift speed threshold */
+#define TH_SPEED_1 10
+#define TH_SPEED_2 15
+#define TH_SPEED_3 20
+/* prevent BT overflow */
+#define DELAY_AFTER_SEND 1000
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+
+/* USER CODE BEGIN PV */
+int volatile range = 0;
+int volatile STATE = 0;
+uint8_t sendBuffer[2];
+HAL_StatusTypeDef ret;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+	
+  /* USER CODE END SysInit */
+	
+  /* Initialize all configured peripherals */
+	MX_GPIO_Init();
+	MX_DMA_Init();
+	MX_I2C1_Init();
+	MX_USART1_UART_Init();
+	MX_I2C2_Init();
+	MX_ADC1_Init();
+	MX_ADC2_Init();
+	/* USER CODE BEGIN 2 */
+
+	HAL_ADC_Start(&hadc1);
+	HAL_Delay(10);
+	HAL_ADC_Start(&hadc2);
+	WriteByte(0x010, 0x01); // SET GPIO0 to 1
+	HAL_Delay(10); 		  // Device BOOT Up, wait for 10ms
+	VL6180X_Init();
+	VL6180X_Start_Range();  // start single range measurement
+	//Rotation detection IMU 0x29
+	imu1 = (bno055_t){.i2c = &hi2c1, .addr = BNO_ADDR, .mode = BNO_MODE_IMU, ._temp_unit = 0};
+	//Shifting detection IMU 0x28
+	imu2 = (bno055_t){.i2c = &hi2c1, .addr = BNO_ADDR_ALT, .mode = BNO_MODE_IMU, ._temp_unit = 0};
+	// Initialize the sensor
+	bno055_init(&imu1);
+	
+	bno055_init(&imu2);
+	//bno055_vec3_t gyroscope1;
+	bno055_euler_t euler1;
+	//bno055_vec3_t accelerometer1;
+	//bno055_vec3_t gyroscope2;
+	//bno055_euler_t euler2;
+	bno055_vec3_t accelerometer2;
+	imu1.euler(&imu1, &euler1);
+	init_euler1_x = euler1.roll;
+	init_euler1_y = euler1.pitch;
+	init_euler1_z = euler1.yaw;
+	
+	// uint16_t zooms =0x00;
+	// uint16_t prev_zooms = 0x11;
+	uint8_t gesture;
+	uint8_t gestureData;
+	uint8_t prevGesture;
+	uint8_t prevGestureData;
+	/* Function prototype */
+	
+	// function that will send out the gesture | data
+	void send2App(uint8_t gesture, uint8_t data, uint8_t* buffer);
+	
+	// buffer used to send
+	send2App(0xab, 0xcd, sendBuffer);
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+	while (1){
+		
+		/* BEGIN OF Update all */
+		// button 1
+		if (HAL_ADC_PollForConversion(&hadc1, 1000000) == HAL_OK){
+			readFSR1 = HAL_ADC_GetValue(&hadc1);
+			HAL_Delay(10);
+			/* check threshold */
+			if(readFSR1 < FSR_threshold){
+				FSR1_pressed = 1;
+			}else{
+				FSR1_pressed = 0;
+			}
+		}
+		// button 2
+		if (HAL_ADC_PollForConversion(&hadc2, 1000000) == HAL_OK){
+			readFSR2 = HAL_ADC_GetValue(&hadc2);
+			HAL_Delay(100);
+			/* check threshold */
+			if(readFSR2 < FSR_threshold){
+				FSR2_pressed = 1;
+			}else{
+				FSR2_pressed = 0;
+			}
+		}
+		// IMU1
+		imu1.euler(&imu1, &euler1);
+		euler1_x = euler1.roll;
+		euler1_y = euler1.pitch;
+		euler1_z = euler1.yaw;
+		//if(euler1_x<0){euler1_x= euler1_x+360;}
+		//if(euler1_y<0){euler1_y= euler1_y+360;}
+		change_x = (euler1_x - init_euler1_x);
+		change_y = (euler1_y - init_euler1_y);
+		change_z = (euler1_z - init_euler1_z);
+		rotate_xyz = 0;
+		// IMU2
+		imu2.linear_acc(&imu2,&accelerometer2);
+		a2_x = accelerometer2.x;
+		a2_y = accelerometer2.y;
+		a2_z = accelerometer2.z;
+		absx = abs((int)a2_x);
+		absy = abs((int)a2_y);
+		absz = abs((int)a2_z);
+		// VL6180X
+		VL6180X_Poll_Range();			
+		range = VL6180X_Read_Range(); // read range result
+		VL6180X_Clear_Interrupts(); // clear the interrupt on VL6180X
+		
+		/* END OF Update all */
+		
+		
+		
+		/* BEGIN OF next state*/
+		switch(STATE){
+			case IDLE:
+				if(ROTATE_MODE){
+					STATE = WAIT_ROTATE;
+					init_euler1_x = euler1_x;
+					init_euler1_y = euler1_y;
+					init_euler1_z = euler1_z;
+				}else if(SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else if(ZOOM_MODE){
+					if (range < 40) {
+						STATE = WAIT_ZOOM_IN;
+					} else if (range > 100) {
+						STATE = WAIT_ZOOM_OUT;
+					}
+				}
+				break;
+			case WAIT_ZOOM_IN :
+				if (ZOOM_MODE){
+					if (range > 40) {
+						STATE = ZOOM_IN_2;
+					} else {
+						STATE = WAIT_ZOOM_IN;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case WAIT_ZOOM_OUT :
+				if (ZOOM_MODE){
+					if (range < 80 && range > 40) {
+						STATE = ZOOM_OUT_2;
+					} else {
+						STATE = WAIT_ZOOM_OUT;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case WAIT_SHIFT :
+				if (SHIFT_MODE){
+					if((absx>absy) & (absx>absz) & (absx > TH_SPEED_1)){//pick x
+						if(a2_x < 0){ //left
+							if (a2_x<-TH_SPEED_1&& a2_x >=-TH_SPEED_2){
+								STATE = SHIFT_L1;
+							}else if (a2_x<-TH_SPEED_2 && a2_x >=-TH_SPEED_3){
+								STATE = SHIFT_L2;
+							}else { // < TH_SPEED_3
+								STATE = SHIFT_L3;
+							}
+						}else{ //right
+							if (a2_x>TH_SPEED_1&& a2_x <=TH_SPEED_2){
+								STATE = SHIFT_R1;
+							}else if (a2_x>TH_SPEED_2&& a2_x <=TH_SPEED_3){
+								STATE = SHIFT_R2;
+							}else { // > TH_SPEED_3
+								STATE = SHIFT_R3;
+							}
+						}
+					}else if((absy>absx) && (absy>absz) && (absy > TH_SPEED_1)){//pick y
+						if(a2_y < 0){ //down
+							if (a2_y<-TH_SPEED_1&& a2_y >=-TH_SPEED_2){
+								STATE = SHIFT_D1;
+							}else if (a2_y<-TH_SPEED_2 && a2_y >=-TH_SPEED_3){
+								STATE = SHIFT_D2;
+							}else { // < TH_SPEED_3
+								STATE = SHIFT_D3;
+							}
+						}else{ //up
+							if (a2_y>TH_SPEED_1&& a2_y <=TH_SPEED_2){
+								STATE = SHIFT_U1;
+							}else if (a2_y>TH_SPEED_2&& a2_y <=TH_SPEED_3){
+								STATE = SHIFT_U2;
+							}else { // > TH_SPEED_3
+								STATE = SHIFT_U3;
+							}
+						}
+					}else if((absz>absx) && (absz>absy) && (absz > TH_SPEED_1)){ //pick z
+						if(a2_z < 0){ //back
+							if (a2_z<-TH_SPEED_1&& a2_z >=-TH_SPEED_2){
+								STATE = SHIFT_B1;
+							}else if (a2_z<-TH_SPEED_2 && a2_z >=-TH_SPEED_3){
+								STATE = SHIFT_B2;
+							}else { // < TH_SPEED_3
+								STATE = SHIFT_B3;
+							}
+						}else{ //forward
+							if (a2_z>TH_SPEED_1&& a2_z <=TH_SPEED_2){
+								STATE = SHIFT_F1;
+							}else if (a2_z>TH_SPEED_2&& a2_z <=TH_SPEED_3){
+								STATE = SHIFT_F2;
+							}else { // > TH_SPEED_3
+								STATE = SHIFT_F3;
+							}
+						}
+					}else {// doesn't exceed any threshold, stay in same state
+						STATE = WAIT_SHIFT;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case WAIT_ROTATE :
+				if (ROTATE_MODE){
+					// figure out the maximum change
+					if((abs((int)change_x)>abs((int)change_y))&& (abs((int)change_x) > abs((int)change_z))){
+						max_change = abs((int)change_x);
+						rotate_xyz = 1;
+					}else if((abs((int)change_y)>abs((int)change_z))&& (abs((int)change_y) > abs((int)change_x))){
+						max_change = abs((int)change_y);
+						rotate_xyz = 2;
+					}else{
+						max_change = abs((int)change_z);
+						rotate_xyz = 3;
+					}
+					// choose x y or z to rotate
+					if(max_change > 10){
+						switch(rotate_xyz){
+							case 1:
+								STATE = ROTATE_X; 
+								break;
+							case 2:
+								STATE = ROTATE_Y;
+								break;
+							case 3:
+								STATE = ROTATE_Z;
+								break;
+						}
+					}else{ //not enough change
+						STATE = WAIT_ROTATE;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case ZOOM_IN_2 :
+				if (ZOOM_MODE){
+					if (range > 80) {
+						STATE = ZOOM_IN_4;
+					} else if (range < 40) {
+						STATE = WAIT_ZOOM_IN;
+					} else {
+						STATE = ZOOM_IN_2;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case ZOOM_IN_4 :
+				if (ZOOM_MODE){
+					if (range < 80) {
+						STATE = ZOOM_IN_2;
+					} else {
+						STATE = ZOOM_IN_4;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case ZOOM_OUT_2 :
+				if (ZOOM_MODE){
+					if (range < 40) {
+						STATE = ZOOM_OUT_4;
+					} else if (range > 100) {
+						STATE = WAIT_ZOOM_OUT;
+					} else {
+						STATE = ZOOM_OUT_2;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case ZOOM_OUT_4 :
+				if (ZOOM_MODE){
+					if (range > 40) {
+						STATE = ZOOM_OUT_2;
+					} else {
+						STATE = ZOOM_OUT_4;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_L1 :
+				if (SHIFT_MODE){
+					if(a2_x >= -TH_SPEED_1){ // slowed down
+						STATE = SHIFT_L1_DONE;
+					}else if (a2_x<-TH_SPEED_1&& a2_x >=-TH_SPEED_2){
+						STATE = SHIFT_L1;
+					}else if (a2_x<-TH_SPEED_2 && a2_x >=-TH_SPEED_3){
+						STATE = SHIFT_L2;
+					}else {
+						STATE = SHIFT_L3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_L2 :
+				if (SHIFT_MODE){
+					if(a2_x >= -TH_SPEED_2){ // slowed down
+						STATE = SHIFT_L2_DONE;
+					}else if (a2_x<-TH_SPEED_2 && a2_x >=-TH_SPEED_3){
+						STATE = SHIFT_L2;
+					}else {
+						STATE = SHIFT_L3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_L3 :
+				if (SHIFT_MODE){
+					if(a2_x >= -TH_SPEED_3){ // slowed down
+						STATE = SHIFT_L3_DONE;
+					}else {
+						STATE = SHIFT_L3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_L1_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_L2_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_L3_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_R1 :
+				if (SHIFT_MODE){
+					if(a2_x<=TH_SPEED_1){
+						STATE = SHIFT_R1_DONE;
+					}else if (a2_x>TH_SPEED_1&& a2_x <=TH_SPEED_2){
+						STATE = SHIFT_R1;
+					}else if (a2_x>TH_SPEED_2&& a2_x <=TH_SPEED_3){
+						STATE = SHIFT_R2;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_R3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_R2 :
+				if (SHIFT_MODE){
+					if(a2_x<=TH_SPEED_2){
+						STATE = SHIFT_R2_DONE;
+					}else if (a2_x>TH_SPEED_2&& a2_x <=TH_SPEED_3){
+						STATE = SHIFT_R2;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_R3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_R3 :
+				if (SHIFT_MODE){
+					if(a2_x<=TH_SPEED_3){
+						STATE = SHIFT_R3_DONE;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_R3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_R1_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_R2_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_R3_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_U1 :
+				if (SHIFT_MODE){
+					if(a2_y<=TH_SPEED_1){
+						STATE = SHIFT_U1_DONE;
+					}else if (a2_y>TH_SPEED_1&& a2_y <=TH_SPEED_2){
+						STATE = SHIFT_U1;
+					}else if (a2_y>TH_SPEED_2&& a2_y <=TH_SPEED_3){
+						STATE = SHIFT_U2;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_U3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_U2 :
+				if (SHIFT_MODE){
+					if(a2_y<=TH_SPEED_2){
+						STATE = SHIFT_U2_DONE;
+					}else if (a2_y>TH_SPEED_2&& a2_y <=TH_SPEED_3){
+						STATE = SHIFT_U2;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_U3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_U3 :
+				if (SHIFT_MODE){
+					if(a2_y<=TH_SPEED_3){
+						STATE = SHIFT_U3_DONE;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_U3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_U1_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_U2_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_U3_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_D1 :
+				if (SHIFT_MODE){
+					if(a2_y >= -TH_SPEED_1){ // slowed down
+						STATE = SHIFT_D1_DONE;
+					}else if (a2_y<-TH_SPEED_1&& a2_y >=-TH_SPEED_2){
+						STATE = SHIFT_D1;
+					}else if (a2_y<-TH_SPEED_2 && a2_y >=-TH_SPEED_3){
+						STATE = SHIFT_D2;
+					}else {
+						STATE = SHIFT_D3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_D2 :
+				if (SHIFT_MODE){
+					if(a2_y >= -TH_SPEED_2){ // slowed down
+						STATE = SHIFT_D2_DONE;
+					}else if (a2_y<-TH_SPEED_2 && a2_y >=-TH_SPEED_3){
+						STATE = SHIFT_D2;
+					}else {
+						STATE = SHIFT_D3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_D3 :
+				if (SHIFT_MODE){
+					if(a2_y >= -TH_SPEED_3){ // slowed down
+						STATE = SHIFT_D3_DONE;
+					}else {
+						STATE = SHIFT_D3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_D1_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_D2_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_D3_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_F1 :
+				if (SHIFT_MODE){
+					if(a2_z<=TH_SPEED_1){
+						STATE = SHIFT_F1_DONE;
+					}else if (a2_z>TH_SPEED_1&& a2_z <=TH_SPEED_2){
+						STATE = SHIFT_F1;
+					}else if (a2_z>TH_SPEED_2&& a2_z <=TH_SPEED_3){
+						STATE = SHIFT_F2;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_F3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_F2 :
+				if (SHIFT_MODE){
+					if(a2_z<=TH_SPEED_2){
+						STATE = SHIFT_F2_DONE;
+					}else if (a2_z>TH_SPEED_2&& a2_z <=TH_SPEED_3){
+						STATE = SHIFT_F2;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_F3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_F3 :
+				if (SHIFT_MODE){
+					if(a2_z<=TH_SPEED_3){
+						STATE = SHIFT_F3_DONE;
+					}else { // > TH_SPEED_3
+						STATE = SHIFT_F3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_F1_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_F2_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_F3_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_B1 :
+				if (SHIFT_MODE){
+					if(a2_z >= -TH_SPEED_1){ // slowed down
+						STATE = SHIFT_B1_DONE;
+					}else if (a2_z<-TH_SPEED_1&& a2_z >=-TH_SPEED_2){
+						STATE = SHIFT_B1;
+					}else if (a2_z<-TH_SPEED_2 && a2_z >=-TH_SPEED_3){
+						STATE = SHIFT_B2;
+					}else {
+						STATE = SHIFT_B3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_B2 :
+				if (SHIFT_MODE){
+					if(a2_z >= -TH_SPEED_2){ // slowed down
+						STATE = SHIFT_B2_DONE;
+					}else if (a2_z<-TH_SPEED_2 && a2_z >=-TH_SPEED_3){
+						STATE = SHIFT_B2;
+					}else {
+						STATE = SHIFT_B3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_B3 :
+				if (SHIFT_MODE){
+					if(a2_z >= -TH_SPEED_3){ // slowed down
+						STATE = SHIFT_B3_DONE;
+					}else {
+						STATE = SHIFT_B3;
+					}
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_B1_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_B2_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case SHIFT_B3_DONE :
+				if (SHIFT_MODE){
+					STATE = WAIT_SHIFT;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case ROTATE_X :
+				if (ROTATE_MODE){
+					STATE = WAIT_ROTATE;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case ROTATE_Y :
+				if (ROTATE_MODE){
+					STATE = WAIT_ROTATE;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+			case ROTATE_Z :
+				if (ROTATE_MODE){
+					STATE = WAIT_ROTATE;
+				}else{
+					STATE = IDLE;
+				}
+				break;
+		
+		}
+		/* END OF next state*/
+
+		/* BEGIN OF state behavior*/
+		switch(STATE){
+			case IDLE :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case WAIT_ZOOM_IN :
+				gesture = CMD_ZOOM;
+				gestureData = DATA_NO_ZOOM_IN_OUT;
+				break;
+			case WAIT_ZOOM_OUT :
+				gesture = CMD_ZOOM;
+				gestureData = DATA_NO_ZOOM_IN_OUT;
+				break;
+			case WAIT_SHIFT :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case WAIT_ROTATE :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case ZOOM_IN_2 :
+				gesture = CMD_ZOOM;
+				gestureData = DATA_ZOOM_IN_2;
+				break;
+			case ZOOM_IN_4 :
+				gesture = CMD_ZOOM;
+				gestureData = DATA_ZOOM_IN_4;
+				break;
+			case ZOOM_OUT_2 :
+				gesture = CMD_ZOOM;
+				gestureData = DATA_ZOOM_OUT_2;
+				break;
+			case ZOOM_OUT_4 :
+				gesture = CMD_ZOOM;
+				gestureData = DATA_ZOOM_OUT_4;
+				break;
+			case SHIFT_L1 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_L2 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_L3 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_L1_DONE :
+				gesture = CMD_LEFT;
+				gestureData = DATA_SHIFT_SPEED_1;
+				break;
+			case SHIFT_L2_DONE :
+				gesture = CMD_LEFT;
+				gestureData = DATA_SHIFT_SPEED_2;
+				break;
+			case SHIFT_L3_DONE :
+				gesture = CMD_LEFT;
+				gestureData = DATA_SHIFT_SPEED_3;
+				break;
+			case SHIFT_R1 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_R2 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_R3 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_R1_DONE :
+				gesture = CMD_RIGHT;
+				gestureData = DATA_SHIFT_SPEED_1;
+				break;
+			case SHIFT_R2_DONE :
+				gesture = CMD_RIGHT;
+				gestureData = DATA_SHIFT_SPEED_2;
+				break;
+			case SHIFT_R3_DONE :
+				gesture = CMD_RIGHT;
+				gestureData = DATA_SHIFT_SPEED_3;
+				break;
+			case SHIFT_U1 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_U2 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_U3 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_U1_DONE :
+				gesture = CMD_UP;
+				gestureData = DATA_SHIFT_SPEED_1;
+				break;
+			case SHIFT_U2_DONE :
+				gesture = CMD_UP;
+				gestureData = DATA_SHIFT_SPEED_2;
+				break;
+			case SHIFT_U3_DONE :
+				gesture = CMD_UP;
+				gestureData = DATA_SHIFT_SPEED_3;
+				break;
+			case SHIFT_D1 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_D2 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_D3 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_D1_DONE :
+				gesture = CMD_DOWN;
+				gestureData = DATA_SHIFT_SPEED_1;
+				break;
+			case SHIFT_D2_DONE :
+				gesture = CMD_DOWN;
+				gestureData = DATA_SHIFT_SPEED_2;
+				break;
+			case SHIFT_D3_DONE :
+				gesture = CMD_DOWN;
+				gestureData = DATA_SHIFT_SPEED_3;
+				break;
+			case SHIFT_F1 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_F2 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_F3 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_F1_DONE :
+				gesture = CMD_FRONT;
+				gestureData = DATA_SHIFT_SPEED_1;
+				break;
+			case SHIFT_F2_DONE :
+				gesture = CMD_FRONT;
+				gestureData = DATA_SHIFT_SPEED_2;
+				break;
+			case SHIFT_F3_DONE :
+				gesture = CMD_FRONT;
+				gestureData = DATA_SHIFT_SPEED_3;
+				break;
+			case SHIFT_B1 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_B2 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_B3 :
+				gesture = CMD_NONE;
+				gestureData = DATA_NONE;
+				break;
+			case SHIFT_B1_DONE :
+				gesture = CMD_BACK;
+				gestureData = DATA_SHIFT_SPEED_1;
+				break;
+			case SHIFT_B2_DONE :
+				gesture = CMD_BACK;
+				gestureData = DATA_SHIFT_SPEED_2;
+				break;
+			case SHIFT_B3_DONE :
+				gesture = CMD_BACK;
+				gestureData = DATA_SHIFT_SPEED_3;
+				break;
+			case ROTATE_X :
+				gesture = CMD_ROTATE_X;
+				gestureData = change_x/10;
+				init_euler1_x = init_euler1_x + change_x;
+				break;
+			case ROTATE_Y :
+				gesture = CMD_ROTATE_Y;
+				gestureData = change_y/10;
+				init_euler1_y = init_euler1_y + change_y;
+				break;
+			case ROTATE_Z :
+				gesture = CMD_ROTATE_Z;
+				gestureData = change_z/10;
+				init_euler1_z = init_euler1_z + change_z;
+				break;
+		}
+		/* END OF state behavior*/
+		
+		/* BEGIN OF bluetooth output */
+		if ( (prevGesture != gesture) || (prevGestureData != gestureData)){
+			if (gesture != CMD_NONE){
+				send2App(gesture, gestureData, sendBuffer);
+				HAL_Delay(DELAY_AFTER_SEND);
+			}
+		}
+		/* END OF bluetooth output*/
+
+		/* BEGIN OF state update*/
+		prevGesture = gesture;
+		prevGestureData = gestureData;
+		/* END OF state update*/
+		
+		
+		//HAL_Delay(1000);
+
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 1;
+  RCC_OscInitStruct.PLL.PLLN = 10;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* USER CODE BEGIN 4 */
+void send2App(uint8_t gesture, uint8_t data, uint8_t* buffer){
+	//uint16_t result = (data<<8)|(gesture);
+	buffer[0] = gesture;
+	buffer[1] = data;
+	HAL_UART_Transmit(&huart1, buffer, 2,100);
+	//printf("%x,",gesture);
+	//printf("%x\n",data);
+}
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
