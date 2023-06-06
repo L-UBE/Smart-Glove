@@ -12,7 +12,11 @@
   * This software is licensed under terms that can be found in the LICENSE file
   * in the root directoLy of this software component.
   * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+	*
+  * VL6180.h .c by Ryan Chau
+	* bno055.h .c by Christine Wan
+	* State machine implementation of gesture control by Eric Hsieh
+	* Last updated on June 5th 2023
   ******************************************************************************
   */
 /* USER CODE END Header */
